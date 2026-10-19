@@ -1,36 +1,37 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# JobFlow
 
-## Getting Started
+JobFlow is a Next.js job and project management application backed by PostgreSQL and Prisma.
 
-First, run the development server:
+## Database Setup
+
+Install PostgreSQL and create a local database. Set `DATABASE_URL` in `.env` or `.env.local` to the connection string for that database. Environment files are ignored by Git; never commit credentials.
+
+The schema uses Prisma migrations:
+
+```bash
+npm run db:validate
+npm run db:migrate
+```
+
+The development seed is repeatable. It upserts the deterministic development user and ten fictional jobs, so running it again updates those records instead of creating duplicates:
+
+```bash
+npm run db:seed
+```
+
+Inspect local records with:
+
+```bash
+npm run db:studio
+```
+
+Server-side Job operations live in `lib/jobs/data-access.ts`. They validate incoming data, scope operations to a user ID, and serialize Decimal budgets as strings for predictable transport. Dashboard recent Jobs intentionally use the five most recently updated records for a compact summary; the Jobs page retrieves the complete set. Authentication is intentionally not implemented yet; operations default to the seeded development user until an authenticated user ID can be supplied.
+
+## Development Commands
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm run lint
+npm run build
 ```
-
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
-
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
-
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
-
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+# jobflow
