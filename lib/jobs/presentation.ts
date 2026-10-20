@@ -1,22 +1,8 @@
 import "server-only";
 
 import type { DashboardStats, JobRecord } from "./data-access";
+import { statusLabel, priorityLabel } from "./mapping";
 import type { Job } from "@/app/components/job-data";
-
-const statusLabels = {
-  PLANNING: "Planning",
-  IN_PROGRESS: "In Progress",
-  ON_HOLD: "On Hold",
-  COMPLETED: "Completed",
-  CANCELLED: "Cancelled",
-} as const;
-
-const priorityLabels = {
-  LOW: "Low",
-  MEDIUM: "Medium",
-  HIGH: "High",
-  URGENT: "Urgent",
-} as const;
 
 function formatDate(value: Date | null): string {
   return value ? value.toISOString().slice(0, 10) : "";
@@ -35,8 +21,8 @@ export function toUiJob(job: JobRecord): Job {
     title: job.title,
     description: job.description ?? "",
     client: job.client ?? "",
-    status: statusLabels[job.status],
-    priority: priorityLabels[job.priority],
+    status: statusLabel(job.status),
+    priority: priorityLabel(job.priority),
     deadline: formatDate(job.deadline),
     budget: formatBudget(job.budget),
     progress: job.progress,

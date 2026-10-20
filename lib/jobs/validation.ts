@@ -35,19 +35,30 @@ const budget = z
     }
   });
 
-const commonFields = {
-  title: z.string().trim().min(1, "Title is required.").max(100),
-  description: z.string().trim().max(1000).nullable().optional(),
-  client: z.string().trim().max(200).nullable().optional(),
-  status: z.nativeEnum(JobStatus).default(JobStatus.PLANNING),
-  priority: z.nativeEnum(JobPriority).default(JobPriority.MEDIUM),
-  deadline,
-  budget,
-  progress: z.number().int().min(0).max(100).default(0),
-};
+const title = z.string().trim().min(1, "Title is required.").max(100);
+const description = z.string().trim().max(1000).nullable().optional();
+const client = z.string().trim().max(200).nullable().optional();
+const status = z.nativeEnum(JobStatus);
+const priority = z.nativeEnum(JobPriority);
+const progress = z.number().int().min(0).max(100);
 
-export const createJobSchema = z.object(commonFields).strict();
-export const updateJobSchema = createJobSchema.partial().strict().refine(
+/**
+ * Base field schemas without defaults, shared by create and update schemas.
+ * Defaults are deliberately applied only on the create schema so that a
+ * partial update never silently injects values the caller did not send.
+ * Progress has no default anywhere: the data layer derives the initial
+ * value (Completed => 100, otherwise 0) so the rule lives in one place.
+ */
+const baseFields = { title, description, client, status, priority, deadline, budget, progress };
+
+export const createJobSchema = z.object({
+  ...baseFields,
+  status: status.default(JobStatus.PLANNING),
+  priority: priority.default(JobPriority.MEDIUM),
+  progress: progress.optional(),
+}).strict();
+
+export const updateJobSchema = z.object(baseFields).partial().strict().refine(
   (value) => Object.keys(value).length > 0,
   "At least one job field must be provided.",
 );

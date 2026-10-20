@@ -3,6 +3,7 @@ import "server-only";
 import { ActivityType, JobPriority, JobStatus, Prisma } from "@prisma/client";
 import { AppError, toDatabaseError } from "../errors";
 import { prisma } from "../prisma";
+import { applyStatusProgressRule, buildUpdateActivityMessage, chooseUpdateActivityType, type ComparableJob } from "./mapping";
 import {
   createJobSchema,
   updateJobSchema,
@@ -33,6 +34,18 @@ function serializeJob(job: SelectedJob): JobRecord {
   return { ...job, budget: job.budget?.toFixed(2) ?? null };
 }
 
+function toComparable(job: SelectedJob): ComparableJob {
+  return {
+    title: job.title,
+    description: job.description,
+    client: job.client,
+    status: job.status,
+    priority: job.priority,
+    deadline: job.deadline?.toISOString().slice(0, 10) ?? "",
+    budget: job.budget?.toFixed(2) ?? null,
+  };
+}
+
 function validateInput<T>(schema: { parse: (input: T) => ValidatedCreateJobInput | ValidatedUpdateJobInput }, input: T): ValidatedCreateJobInput | ValidatedUpdateJobInput {
   try {
     return schema.parse(input);
@@ -49,10 +62,12 @@ export type GetJobsOptions = {
   priority?: JobPriority;
   search?: string;
   sort?: JobSort;
+  limit?: number;
+  offset?: number;
 };
 
 export async function getJobs(options: GetJobsOptions = {}): Promise<JobRecord[]> {
-  const { userId, status, priority, search, sort = "newest" } = options;
+  const { userId, status, priority, search, sort = "newest", limit, offset } = options;
   if (!userId) throw new AppError("INVALID_INPUT", "A user session is required.");
   const where: Prisma.JobWhereInput = {
     userId,
@@ -71,7 +86,7 @@ export async function getJobs(options: GetJobsOptions = {}): Promise<JobRecord[]
         : [{ createdAt: "desc" }];
 
   try {
-    const jobs = await prisma.job.findMany({ where, orderBy, select: jobSelect });
+    const jobs = await prisma.job.findMany({ where, orderBy, select: jobSelect, ...(limit ? { take: limit, skip: offset ?? 0 } : {}) });
     return jobs.map(serializeJob);
   } catch (error) {
     throw toDatabaseError("get jobs", error);
@@ -91,7 +106,10 @@ export async function createJob(input: CreateJobInput, userId: string): Promise<
   const data = validateInput(createJobSchema, input) as ValidatedCreateJobInput;
   try {
     const job = await prisma.$transaction(async tx => {
-      const created = await tx.job.create({ data: { ...data, userId }, select: jobSelect });
+      // The documented initial-progress rule: jobs created directly as
+      // Completed start at 100%; everything else starts at 0%.
+      const progress = data.status === JobStatus.COMPLETED ? 100 : (data.progress ?? 0);
+      const created = await tx.job.create({ data: { ...data, progress, userId }, select: jobSelect });
       await tx.activity.create({ data: { type: ActivityType.JOB_CREATED, message: `Created job “${created.title}”`, jobId: created.id, userId } });
       return created;
     });
@@ -104,12 +122,19 @@ export async function createJob(input: CreateJobInput, userId: string): Promise<
 export async function updateJob(id: string, input: UpdateJobInput, userId: string): Promise<JobRecord> {
   const data = validateInput(updateJobSchema, input) as ValidatedUpdateJobInput;
   try {
-    const existing = await prisma.job.findFirst({ where: { id, userId }, select: { id: true } });
-    if (!existing) throw new AppError("NOT_FOUND", "Job not found.");
     const job = await prisma.$transaction(async tx => {
-      const updated = await tx.job.update({ where: { id }, data, select: jobSelect });
-      const type = data.status === JobStatus.COMPLETED ? ActivityType.JOB_COMPLETED : data.status === JobStatus.CANCELLED ? ActivityType.JOB_CANCELLED : data.status ? ActivityType.STATUS_CHANGED : data.priority ? ActivityType.PRIORITY_CHANGED : data.deadline !== undefined ? ActivityType.DUE_DATE_CHANGED : ActivityType.JOB_UPDATED;
-      await tx.activity.create({ data: { type, message: type === ActivityType.STATUS_CHANGED ? `Changed status to ${updated.status.replaceAll("_", " ")}` : `Updated job “${updated.title}”`, jobId: id, userId } });
+      // Ownership check and mutation happen inside one transaction so a foreign
+      // or missing job can never be mutated, and the update reads the same
+      // row it validates against.
+      const existing = await tx.job.findFirst({ where: { id, userId }, select: jobSelect });
+      if (!existing) throw new AppError("NOT_FOUND", "Job not found.");
+      const patch = applyStatusProgressRule(data, existing.status);
+      const updated = await tx.job.update({ where: { id }, data: patch, select: jobSelect });
+      const type = chooseUpdateActivityType(toComparable(existing), toComparable(updated));
+      if (type) {
+        const message = buildUpdateActivityMessage(type, toComparable(existing), toComparable(updated));
+        await tx.activity.create({ data: { type, message, jobId: id, userId } });
+      }
       return updated;
     });
     return serializeJob(job);
@@ -129,14 +154,6 @@ export async function deleteJob(id: string, userId: string): Promise<void> {
   }
 }
 
-export async function countJobs(userId: string): Promise<number> {
-  try {
-    return await prisma.job.count({ where: { userId } });
-  } catch (error) {
-    throw toDatabaseError("count jobs", error);
-  }
-}
-
 export type DashboardStats = {
   totalJobs: number;
   activeJobs: number;
@@ -148,6 +165,14 @@ export type DashboardStats = {
   recentJobs: JobRecord[];
 };
 
+/**
+ * Stat definitions (documented, kept consistent with the dashboard labels):
+ * - totalJobs: every job owned by the user.
+ * - activeJobs: PLANNING + IN_PROGRESS + ON_HOLD.
+ * - completedJobs / cancelledJobs: those terminal statuses.
+ * - overdueJobs: deadline in the past and not yet in a terminal status.
+ * - dueSoonJobs: deadline within the next 7 days, not yet terminal.
+ */
 export async function getDashboardStats(userId: string): Promise<DashboardStats> {
   const now = new Date();
   const dueSoon = new Date(now);

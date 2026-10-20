@@ -32,8 +32,13 @@ export async function getAllUserTasks(userId: string) {
   return prisma.task.findMany({ where: { job: { userId } }, orderBy: [{ completed: "asc" }, { dueDate: { sort: "asc", nulls: "last" } }, { createdAt: "desc" }], select: { ...taskSelect, job: { select: { id: true, title: true, priority: true } } } });
 }
 
-export async function getDashboardActivities(userId: string): Promise<ActivityRecord[]> {
-  return prisma.activity.findMany({ where: { userId }, orderBy: { createdAt: "desc" }, take: 8, select: { id: true, type: true, message: true, createdAt: true, jobId: true, job: { select: { title: true } } } }).then(items => items.map(item => ({ ...item, jobTitle: item.job.title })));
+/**
+ * Recent activity for a user. `limit` defaults to the 8-entry dashboard
+ * summary; the activity page passes its own page size.
+ */
+export async function getDashboardActivities(userId: string, limit = 8): Promise<ActivityRecord[]> {
+  const take = Math.min(Math.max(Math.trunc(limit) || 8, 1), 200);
+  return prisma.activity.findMany({ where: { userId }, orderBy: { createdAt: "desc" }, take, select: { id: true, type: true, message: true, createdAt: true, jobId: true, job: { select: { title: true } } } }).then(items => items.map(item => ({ ...item, jobTitle: item.job.title })));
 }
 
 export async function createTask(jobId: string, userId: string, title: string, dueDate: string | null) {
