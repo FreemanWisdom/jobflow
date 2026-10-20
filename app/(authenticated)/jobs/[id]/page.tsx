@@ -11,7 +11,10 @@ export default async function JobDetailPage({ params }: { params: Promise<{ id: 
   const session = (await getSession()) as { user?: { id?: string } } | null;
   if (!session?.user?.id) redirect("/sign-in");
   const { id } = await params;
-  const [job, tasks, activities] = await Promise.all([getJobById(id, session.user.id), getJobTasks(id, session.user.id), getJobActivities(id, session.user.id)]);
+  // Validate ownership before loading dependent data: a missing or foreign job
+  // id must resolve to a 404, never an error page or another user's data.
+  const job = await getJobById(id, session.user.id);
   if (!job) notFound();
+  const [tasks, activities] = await Promise.all([getJobTasks(id, session.user.id), getJobActivities(id, session.user.id)]);
   return <JobDetail initialJob={toUiJob(job)} initialTasks={tasks.map(task => ({ id: task.id, title: task.title, completed: task.completed, dueDate: task.dueDate?.toISOString().slice(0, 10) ?? "", createdAt: task.createdAt.toISOString(), updatedAt: task.updatedAt.toISOString() }))} initialActivities={activities.map(activity => ({ id: activity.id, message: activity.message, createdAt: activity.createdAt.toISOString(), jobTitle: activity.jobTitle }))} />;
 }
