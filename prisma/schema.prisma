@@ -37,16 +37,18 @@ enum ActivityType {
 }
 
 model User {
-  id        String   @id @default(cuid())
-  email     String   @unique
-  name      String?
-  passwordHash String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id            String    @id @default(cuid())
+  email         String    @unique
+  name          String?
+  passwordHash  String?
+  emailVerified DateTime?
+  image         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
 
-  jobs      Job[]
+  jobs       Job[]
   activities Activity[]
-  accounts Account[]
+  accounts   Account[]
 }
 
 model Account {
@@ -63,27 +65,28 @@ model Account {
   id_token          String?
   session_state     String?
   user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
   @@unique([provider, providerAccountId])
   @@index([userId])
 }
 
 model Job {
-  id          String     @id @default(cuid())
+  id          String      @id @default(cuid())
   title       String
   description String?
   client      String?
-  status      JobStatus  @default(PLANNING)
+  status      JobStatus   @default(PLANNING)
   priority    JobPriority @default(MEDIUM)
   deadline    DateTime?
   budget      Decimal?
-  progress    Int        @default(0)
-  createdAt   DateTime   @default(now())
-  updatedAt   DateTime   @updatedAt
+  progress    Int         @default(0)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
 
-  userId      String
-  user        User       @relation(fields: [userId], references: [id], onDelete: Cascade)
-  tasks       Task[]
-  activities  Activity[]
+  userId     String
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tasks      Task[]
+  activities Activity[]
 
   @@index([userId])
   @@index([status])
@@ -92,12 +95,12 @@ model Job {
 }
 
 model Task {
-  id        String   @id @default(cuid())
+  id        String    @id @default(cuid())
   title     String
-  completed Boolean  @default(false)
+  completed Boolean   @default(false)
   dueDate   DateTime?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
 
   jobId String
   job   Job    @relation(fields: [jobId], references: [id], onDelete: Cascade)
