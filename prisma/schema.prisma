@@ -22,14 +22,49 @@ enum JobPriority {
   URGENT
 }
 
+enum ActivityType {
+  JOB_CREATED
+  JOB_UPDATED
+  STATUS_CHANGED
+  PRIORITY_CHANGED
+  DUE_DATE_CHANGED
+  JOB_COMPLETED
+  JOB_CANCELLED
+  TASK_CREATED
+  TASK_COMPLETED
+  TASK_REOPENED
+  TASK_DELETED
+}
+
 model User {
   id        String   @id @default(cuid())
   email     String   @unique
   name      String?
+  passwordHash String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   jobs      Job[]
+  activities Activity[]
+  accounts Account[]
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@unique([provider, providerAccountId])
+  @@index([userId])
 }
 
 model Job {
@@ -47,9 +82,41 @@ model Job {
 
   userId      String
   user        User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tasks       Task[]
+  activities  Activity[]
 
   @@index([userId])
   @@index([status])
   @@index([priority])
   @@index([deadline])
+}
+
+model Task {
+  id        String   @id @default(cuid())
+  title     String
+  completed Boolean  @default(false)
+  dueDate   DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  jobId String
+  job   Job    @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId, completed])
+  @@index([dueDate])
+}
+
+model Activity {
+  id        String       @id @default(cuid())
+  type      ActivityType
+  message   String
+  createdAt DateTime     @default(now())
+
+  jobId  String
+  job    Job    @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([jobId, createdAt])
+  @@index([userId, createdAt])
 }
