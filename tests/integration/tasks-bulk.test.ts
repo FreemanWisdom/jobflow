@@ -148,6 +148,63 @@ describe("createTasksBulk", () => {
     expect(await prisma.task.count({ where: { jobId: job.id } })).toBe(2);
   });
 
+  it("rejects impossible calendar dates that JavaScript would silently normalize", async () => {
+    const job = await makeJob(userA, "Calendar edge cases");
+    const impossible = [
+      "2026-02-30", // February 30 normalizes to March 2
+      "2026-02-29", // 2026 is not a leap year
+      "2026-04-31", // April has 30 days
+      "2026-06-31",
+      "2026-11-31",
+      "2026-13-01", // month 13 normalizes to January 2027
+      "2026-00-10", // month 0 normalizes to December 2025
+      "2026-01-00", // day 0 normalizes to December 31
+      "2026-1-05",  // not strict YYYY-MM-DD
+      "26-02-28",
+    ];
+    for (const dueDate of impossible) {
+      const result = createTasksBulk(job.id, userA, planId(), [{ title: "Impossible date task", dueDate }]);
+      await expect(result).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    }
+    expect(await prisma.task.findMany({ where: { jobId: job.id } })).toHaveLength(0);
+  });
+
+  it("accepts real calendar dates including leap days", async () => {
+    const job = await makeJob(userA, "Leap day job");
+    const result = await createTasksBulk(job.id, userA, planId(), [
+      taskInput({ dueDate: "2028-02-29" }), // 2028 is a leap year
+      taskInput({ dueDate: "2026-02-28" }),
+    ]);
+    expect(result.duplicate).toBe(false);
+    expect(result.created[0].dueDate?.toISOString()).toBe("2028-02-29T00:00:00.000Z");
+    expect(result.created[1].dueDate?.toISOString()).toBe("2026-02-28T00:00:00.000Z");
+  });
+
+  it("matches plan markers literally when ids contain underscores or look-alike characters", async () => {
+    const job = await makeJob(userA, "Marker literalness job");
+    // Hyphenated id created first: an unescaped LIKE-style lookup for the
+    // underscore id below would match its message ('_' matches any char),
+    // falsely reporting a duplicate for an id that was never created.
+    const hyphenId = "marker-test-plan-2026-01";
+    const underscoreId = "marker_test_plan_2026_01";
+    const similarUnderscoreId = "marker_test_plan_2026_10";
+
+    const hyphen = await createTasksBulk(job.id, userA, hyphenId, [taskInput({ title: "From hyphen id" })]);
+    const underscore = await createTasksBulk(job.id, userA, underscoreId, [taskInput({ title: "From underscore id" })]);
+    const similar = await createTasksBulk(job.id, userA, similarUnderscoreId, [taskInput({ title: "From similar id" })]);
+
+    expect(hyphen.duplicate).toBe(false);
+    expect(underscore.duplicate).toBe(false); // must not cross-match the hyphen id
+    expect(similar.duplicate).toBe(false);
+
+    // Retrying each id is detected, and each retry only matches its own marker.
+    expect((await createTasksBulk(job.id, userA, hyphenId, [taskInput({ title: "Retry hyphen" })])).duplicate).toBe(true);
+    expect((await createTasksBulk(job.id, userA, underscoreId, [taskInput({ title: "Retry underscore" })])).duplicate).toBe(true);
+    expect((await createTasksBulk(job.id, userA, similarUnderscoreId, [taskInput({ title: "Retry similar" })])).duplicate).toBe(true);
+    expect(await prisma.task.count({ where: { jobId: job.id } })).toBe(3);
+    expect(await prisma.activity.count({ where: { jobId: job.id, type: ActivityType.TASK_CREATED } })).toBe(3);
+  });
+
   it("serializes concurrent retries of the same plan so only one batch lands", async () => {
     const job = await makeJob(userA, "Concurrency job");
     const plan = planId();

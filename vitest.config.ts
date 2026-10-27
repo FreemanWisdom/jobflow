@@ -6,6 +6,9 @@ export default defineConfig({
     environment: "node",
     include: ["tests/**/*.test.ts"],
     setupFiles: ["./tests/setup.ts"],
+    // Integration suites share one PostgreSQL database; run files serially so
+    // their user fixtures cannot interfere across suites.
+    fileParallelism: false,
   },
   resolve: {
     alias: {

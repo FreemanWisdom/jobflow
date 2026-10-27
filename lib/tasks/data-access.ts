@@ -88,10 +88,18 @@ export type BulkCreateTasksResult = {
   created: TaskRecord[];
 };
 
+const dueDatePattern = /^\d{4}-\d{2}-\d{2}$/;
+
 function parseBulkDueDate(dueDate: string | null) {
   if (!dueDate) return null;
-  const parsed = new Date(`${dueDate}T00:00:00.000Z`);
-  if (Number.isNaN(parsed.getTime())) throw new AppError("INVALID_INPUT", "Task due date is invalid.");
+  if (!dueDatePattern.test(dueDate)) throw new AppError("INVALID_INPUT", "Task due date is invalid.");
+  const [year, month, day] = dueDate.split("-").map(Number);
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  // Reject impossible calendar dates that JavaScript would silently
+  // normalize (e.g. 2026-02-30 -> March 2): the components must round-trip.
+  if (parsed.getUTCFullYear() !== year || parsed.getUTCMonth() !== month - 1 || parsed.getUTCDate() !== day) {
+    throw new AppError("INVALID_INPUT", "Task due date is invalid.");
+  }
   return parsed;
 }
 
@@ -129,8 +137,16 @@ export async function createTasksBulk(jobId: string, userId: string, planId: str
     // Serialize retries of the same plan: a concurrent duplicate blocks here
     // until the first transaction commits, then sees the marker below.
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${marker}))`;
-    const prior = await tx.activity.findFirst({ where: { jobId, userId, type: ActivityType.TASK_CREATED, message: { contains: marker } }, select: { id: true } });
-    if (prior) return { duplicate: true, created: [] as TaskRecord[] };
+    // Literal substring match via strpos: Prisma's `contains` uses LIKE
+    // semantics on PostgreSQL where `_` matches any single character, which
+    // would cross-match plan ids that differ only in underscore/hyphen
+    // positions. strpos has no wildcard interpretation.
+    const prior = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT "id" FROM "Activity"
+      WHERE "jobId" = ${jobId} AND "userId" = ${userId} AND "type" = 'TASK_CREATED'
+        AND strpos("message", ${marker}) > 0
+      LIMIT 1`;
+    if (prior.length > 0) return { duplicate: true, created: [] as TaskRecord[] };
 
     const created: TaskRecord[] = [];
     for (const task of prepared) {
