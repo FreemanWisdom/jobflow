@@ -72,3 +72,93 @@ export async function removeTask(taskId: string, userId: string) {
     await tx.activity.create({ data: { type: ActivityType.TASK_DELETED, message: `Deleted task “${task.title}”`, jobId: task.jobId, userId } });
   });
 }
+
+/**
+ * Maximum number of tasks a single bulk request may create.
+ */
+export const MAX_BULK_TASKS = 50;
+
+const planIdPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{7,99}$/;
+
+export type BulkTaskInput = { title: string; dueDate: string | null };
+
+export type BulkCreateTasksResult = {
+  /** True when this plan was already applied; `created` is then empty. */
+  duplicate: boolean;
+  created: TaskRecord[];
+};
+
+const dueDatePattern = /^\d{4}-\d{2}-\d{2}$/;
+
+function parseBulkDueDate(dueDate: string | null) {
+  if (!dueDate) return null;
+  if (!dueDatePattern.test(dueDate)) throw new AppError("INVALID_INPUT", "Task due date is invalid.");
+  const [year, month, day] = dueDate.split("-").map(Number);
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  // Reject impossible calendar dates that JavaScript would silently
+  // normalize (e.g. 2026-02-30 -> March 2): the components must round-trip.
+  if (parsed.getUTCFullYear() !== year || parsed.getUTCMonth() !== month - 1 || parsed.getUTCDate() !== day) {
+    throw new AppError("INVALID_INPUT", "Task due date is invalid.");
+  }
+  return parsed;
+}
+
+/**
+ * Create many tasks on one job in a single transaction and log one summary
+ * activity. The whole batch is validated before anything is written, so a
+ * request either lands completely or not at all.
+ *
+ * Duplicate-request protection: `planId` identifies the plan (a
+ * client-generated id such as a UUID). The summary activity message starts
+ * with the fixed prefix `Bulk plan [plan:<id>]:` and the duplicate lookup
+ * requires that prefix at position 1 of the message. Ordinary single-task
+ * activities embed the user-controlled title, so a task title containing a
+ * fake `[plan:<id>]` marker can never satisfy the anchored match. Nothing is
+ * inserted when the prefix is found and `{ duplicate: true }` is returned,
+ * making retries safe. A transaction-scoped advisory lock serializes
+ * concurrent retries so the marker check cannot race. The lookup uses
+ * strpos (literal, no LIKE wildcards) and the `]` terminator cannot appear
+ * inside a plan id, so distinct ids never cross-match.
+ */
+export async function createTasksBulk(jobId: string, userId: string, planId: string, tasks: BulkTaskInput[]): Promise<BulkCreateTasksResult> {
+  await assertOwnedJob(jobId, userId);
+
+  const cleanPlanId = typeof planId === "string" ? planId.trim() : "";
+  if (!planIdPattern.test(cleanPlanId)) throw new AppError("INVALID_INPUT", "Plan id is required and must be 8-100 letters, digits, hyphens or underscores.");
+
+  const list = Array.isArray(tasks) ? tasks : [];
+  if (list.length === 0) throw new AppError("INVALID_INPUT", "At least one task is required.");
+  if (list.length > MAX_BULK_TASKS) throw new AppError("INVALID_INPUT", `A bulk request may create at most ${MAX_BULK_TASKS} tasks.`);
+
+  const prepared = list.map(task => {
+    const cleanTitle = typeof task?.title === "string" ? task.title.trim() : "";
+    if (!cleanTitle || cleanTitle.length > 200) throw new AppError("INVALID_INPUT", "Task titles are required and must be 200 characters or fewer.");
+    return { title: cleanTitle, dueDate: parseBulkDueDate(task.dueDate ?? null) };
+  });
+
+  const marker = `Bulk plan [plan:${cleanPlanId}]:`;
+  return prisma.$transaction(async tx => {
+    // Serialize retries of the same plan: a concurrent duplicate blocks here
+    // until the first transaction commits, then sees the marker below.
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${marker}))`;
+    // Genuine bulk summaries, and only they, begin with `marker`. The match
+    // is anchored to position 1 via strpos (literal, no LIKE wildcards —
+    // unlike Prisma's `contains`, where `_` matches any character), so a
+    // normal task whose title embeds a fake `[plan:<id>]` marker cannot be
+    // mistaken for a bulk summary: its activity message starts with
+    // `Created task "…"` and the title appears mid-message.
+    const prior = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT "id" FROM "Activity"
+      WHERE "jobId" = ${jobId} AND "userId" = ${userId} AND "type" = 'TASK_CREATED'
+        AND strpos("message", ${marker}) = 1
+      LIMIT 1`;
+    if (prior.length > 0) return { duplicate: true, created: [] as TaskRecord[] };
+
+    const created: TaskRecord[] = [];
+    for (const task of prepared) {
+      created.push(await tx.task.create({ data: { title: task.title, dueDate: task.dueDate, jobId }, select: taskSelect }));
+    }
+    await tx.activity.create({ data: { type: ActivityType.TASK_CREATED, message: `${marker} created ${created.length} tasks`, jobId, userId } });
+    return { duplicate: false, created };
+  });
+}
