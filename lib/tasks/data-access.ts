@@ -72,3 +72,71 @@ export async function removeTask(taskId: string, userId: string) {
     await tx.activity.create({ data: { type: ActivityType.TASK_DELETED, message: `Deleted task “${task.title}”`, jobId: task.jobId, userId } });
   });
 }
+
+/**
+ * Maximum number of tasks a single bulk request may create.
+ */
+export const MAX_BULK_TASKS = 50;
+
+const planIdPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{7,99}$/;
+
+export type BulkTaskInput = { title: string; dueDate: string | null };
+
+export type BulkCreateTasksResult = {
+  /** True when this plan was already applied; `created` is then empty. */
+  duplicate: boolean;
+  created: TaskRecord[];
+};
+
+function parseBulkDueDate(dueDate: string | null) {
+  if (!dueDate) return null;
+  const parsed = new Date(`${dueDate}T00:00:00.000Z`);
+  if (Number.isNaN(parsed.getTime())) throw new AppError("INVALID_INPUT", "Task due date is invalid.");
+  return parsed;
+}
+
+/**
+ * Create many tasks on one job in a single transaction and log one summary
+ * activity. The whole batch is validated before anything is written, so a
+ * request either lands completely or not at all.
+ *
+ * Duplicate-request protection: `planId` identifies the plan (a
+ * client-generated id such as a UUID). If a TASK_CREATED activity carrying
+ * the same `[plan:<id>]` marker already exists for this job and user, nothing
+ * is inserted and `{ duplicate: true }` is returned, making retries safe. A
+ * transaction-scoped advisory lock serializes concurrent retries so the
+ * marker check cannot race. The bracketed marker is matched literally, so
+ * plan ids that are prefixes of each other never collide.
+ */
+export async function createTasksBulk(jobId: string, userId: string, planId: string, tasks: BulkTaskInput[]): Promise<BulkCreateTasksResult> {
+  await assertOwnedJob(jobId, userId);
+
+  const cleanPlanId = typeof planId === "string" ? planId.trim() : "";
+  if (!planIdPattern.test(cleanPlanId)) throw new AppError("INVALID_INPUT", "Plan id is required and must be 8-100 letters, digits, hyphens or underscores.");
+
+  const list = Array.isArray(tasks) ? tasks : [];
+  if (list.length === 0) throw new AppError("INVALID_INPUT", "At least one task is required.");
+  if (list.length > MAX_BULK_TASKS) throw new AppError("INVALID_INPUT", `A bulk request may create at most ${MAX_BULK_TASKS} tasks.`);
+
+  const prepared = list.map(task => {
+    const cleanTitle = typeof task?.title === "string" ? task.title.trim() : "";
+    if (!cleanTitle || cleanTitle.length > 200) throw new AppError("INVALID_INPUT", "Task titles are required and must be 200 characters or fewer.");
+    return { title: cleanTitle, dueDate: parseBulkDueDate(task.dueDate ?? null) };
+  });
+
+  const marker = `[plan:${cleanPlanId}]`;
+  return prisma.$transaction(async tx => {
+    // Serialize retries of the same plan: a concurrent duplicate blocks here
+    // until the first transaction commits, then sees the marker below.
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${marker}))`;
+    const prior = await tx.activity.findFirst({ where: { jobId, userId, type: ActivityType.TASK_CREATED, message: { contains: marker } }, select: { id: true } });
+    if (prior) return { duplicate: true, created: [] as TaskRecord[] };
+
+    const created: TaskRecord[] = [];
+    for (const task of prepared) {
+      created.push(await tx.task.create({ data: { title: task.title, dueDate: task.dueDate, jobId }, select: taskSelect }));
+    }
+    await tx.activity.create({ data: { type: ActivityType.TASK_CREATED, message: `Created ${created.length} tasks in bulk (${marker})`, jobId, userId } });
+    return { duplicate: false, created };
+  });
+}
