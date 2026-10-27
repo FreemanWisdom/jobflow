@@ -4,8 +4,8 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { generatePlanAction } from "@/lib/planning/actions";
 import { createTasksBulkAction } from "@/lib/tasks/actions";
+import { blankTaskIndexes, type DraftTask } from "./plan-draft";
 
-type DraftTask = { title: string; dueDate: string };
 type Draft = { planId: string; goal: string; tasks: DraftTask[] };
 
 // Mirrors MAX_BULK_TASKS in lib/tasks/data-access.ts; the bulk creator
@@ -27,6 +27,7 @@ export function AiPlanner({ jobId }: { jobId: string }) {
   const [pending, setPending] = useState<"" | "generating" | "approving">("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [showBlankWarnings, setShowBlankWarnings] = useState(false);
 
   async function generate(event: React.FormEvent) {
     event.preventDefault();
@@ -37,14 +38,22 @@ export function AiPlanner({ jobId }: { jobId: string }) {
     setPending("generating");
     setError("");
     setNotice("");
-    const result = await generatePlanAction(jobId, goal);
-    if (!result.ok) {
-      setError(result.message);
+    setShowBlankWarnings(false);
+    try {
+      const result = await generatePlanAction(jobId, goal);
+      if (!result.ok) {
+        setError(result.message);
+        return;
+      }
+      setDraft({ planId: result.draft.planId, goal: result.draft.goal, tasks: result.draft.tasks.map(task => ({ title: task.title, dueDate: task.dueDate ?? "" })) });
+    } catch {
+      // The action returns typed failures as data; reaching this means an
+      // unexpected transport-level failure. Surface it instead of leaving
+      // the panel stuck on "Generating…".
+      setError("The plan could not be generated. Check your connection and try again in a moment.");
+    } finally {
       setPending("");
-      return;
     }
-    setDraft({ planId: result.draft.planId, goal: result.draft.goal, tasks: result.draft.tasks.map(task => ({ title: task.title, dueDate: task.dueDate ?? "" })) });
-    setPending("");
   }
 
   function editTask(index: number, patch: Partial<DraftTask>) {
@@ -61,15 +70,25 @@ export function AiPlanner({ jobId }: { jobId: string }) {
 
   async function approve() {
     if (!draft) return;
-    const tasks = draft.tasks.map(task => ({ title: task.title.trim(), dueDate: task.dueDate || null })).filter(task => task.title);
-    if (!tasks.length) {
-      setError("Add or keep at least one task before approving.");
+    if (!draft.tasks.length) {
+      setError("Add at least one task before approving.");
       return;
     }
+    const blanks = blankTaskIndexes(draft.tasks);
+    if (blanks.length > 0) {
+      setShowBlankWarnings(true);
+      const positions = blanks.map(index => index + 1).join(", ");
+      setError(`Task ${blanks.length === 1 ? "row" : "rows"} ${positions} ${blanks.length === 1 ? "needs" : "need"} a title. Fill ${blanks.length === 1 ? "it" : "them"} in or remove ${blanks.length === 1 ? "it" : "them"} before approving.`);
+      return;
+    }
+    setShowBlankWarnings(false);
     setPending("approving");
     setError("");
     setNotice("");
     try {
+      // Submit exactly the rows shown: nothing is silently dropped, and the
+      // Phase A creator re-validates every title and date server-side.
+      const tasks = draft.tasks.map(task => ({ title: task.title.trim(), dueDate: task.dueDate || null }));
       const result = await createTasksBulkAction(jobId, draft.planId, tasks);
       setNotice(result.duplicate ? "This plan was already applied, so nothing was added twice." : `Added ${result.created.length} task${result.created.length === 1 ? "" : "s"}.`);
       setDraft(null);
@@ -86,6 +105,7 @@ export function AiPlanner({ jobId }: { jobId: string }) {
     setDraft(null);
     setError("");
     setNotice("");
+    setShowBlankWarnings(false);
   }
 
   return (
@@ -122,7 +142,8 @@ export function AiPlanner({ jobId }: { jobId: string }) {
                   onChange={event => editTask(index, { title: event.target.value })}
                   maxLength={200}
                   placeholder="Task title"
-                  className="min-w-0 flex-1 rounded-md border border-slate-300 px-3 py-2 text-sm"
+                  aria-label={`Task ${index + 1} title`}
+                  className={`min-w-0 flex-1 rounded-md border px-3 py-2 text-sm ${showBlankWarnings && !task.title.trim() ? "border-rose-400 bg-rose-50" : "border-slate-300"}`}
                 />
                 <input
                   type="date"

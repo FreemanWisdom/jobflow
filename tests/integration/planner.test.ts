@@ -172,6 +172,28 @@ describe("generatePlanAction — provider interaction", () => {
     const result = await generatePlanAction(job.id, "Plan the launch");
     expect(result).toMatchObject({ ok: false, error: "AI_UNAVAILABLE" });
   });
+
+  it("times out when the provider streams headers and then stalls mid-body", async () => {
+    const job = await makeJob(userA, "Body stall job");
+    process.env.OPENAI_TIMEOUT_MS = "50";
+    // fetch resolves (headers arrived) but the body read hangs until aborted:
+    // the timeout must stay armed through response.json(), not just the fetch.
+    vi.stubGlobal("fetch", vi.fn(async (_url: unknown, init?: { signal?: AbortSignal }) => ({
+      ok: true,
+      status: 200,
+      json: () => new Promise((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("aborted")))),
+    }) as unknown as Response) as never);
+    const result = await generatePlanAction(job.id, "Plan the launch");
+    expect(result).toMatchObject({ ok: false, error: "AI_UNAVAILABLE" });
+    expect(await prisma.task.count({ where: { jobId: job.id } })).toBe(0);
+  });
+
+  it("reports an unreadable plan when the body is not valid JSON", async () => {
+    const job = await makeJob(userA, "Bad body job");
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, json: async () => { throw new Error("bad body"); } }) as unknown as Response) as never);
+    const result = await generatePlanAction(job.id, "Plan the launch");
+    expect(result).toMatchObject({ ok: false, error: "AI_INVALID_PLAN" });
+  });
 });
 
 describe("approval through the Phase A bulk creator", () => {

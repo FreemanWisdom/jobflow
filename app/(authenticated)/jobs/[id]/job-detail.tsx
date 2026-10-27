@@ -34,6 +34,11 @@ export function JobDetail({ initialJob, initialTasks, initialActivities }: { ini
   async function addTask(event: React.FormEvent) { event.preventDefault(); if (!taskTitle.trim()) return; setPending(true); try { const task = await createTaskAction(job.id, taskTitle, taskDueDate || null); setTasks(current => [...current, { ...task, dueDate: task.dueDate?.toISOString().slice(0, 10) ?? "" }]); setTaskTitle(""); setTaskDueDate(""); } catch { setError("The task could not be created."); } finally { setPending(false); router.refresh(); } }
   async function toggleTask(task: DetailTask) { setPending(true); try { const updated = await toggleTaskAction(task.id, !task.completed); setTasks(current => current.map(item => item.id === updated.id ? { ...item, ...updated, dueDate: updated.dueDate?.toISOString().slice(0, 10) ?? "" } : item)); } catch { setError("The task could not be updated."); } finally { setPending(false); router.refresh(); } }
   async function removeTask(id: string) { setPending(true); try { await deleteTaskAction(id); setTasks(current => current.filter(task => task.id !== id)); } catch { setError("The task could not be deleted."); } finally { setPending(false); router.refresh(); } }
+  const [prevTasks, setPrevTasks] = useState(initialTasks);
+  if (initialTasks !== prevTasks) {
+    setPrevTasks(initialTasks);
+    setTasks(initialTasks);
+  }
   const [prevActivities, setPrevActivities] = useState(initialActivities);
   if (initialActivities !== prevActivities) {
     setPrevActivities(initialActivities);

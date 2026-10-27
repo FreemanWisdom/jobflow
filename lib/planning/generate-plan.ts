@@ -67,9 +67,12 @@ async function callOpenAI(job: PlanJobContext, goal: string): Promise<PlanTask[]
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
-  let response: Response;
+  let content: unknown;
+  // The timeout stays armed through the fetch AND the body read: a provider
+  // that streams headers and then stalls would otherwise leave response.json()
+  // hanging long past the timeout.
   try {
-    response = await fetch("https://api.openai.com/v1/chat/completions", {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
       signal: controller.signal,
@@ -84,25 +87,28 @@ async function callOpenAI(job: PlanJobContext, goal: string): Promise<PlanTask[]
         ],
       }),
     });
-  } catch {
+
+    if (response.status === 429) throw new AppError("AI_RATE_LIMITED", "The AI planner is busy right now. Wait a moment and try again.");
+    if (!response.ok) {
+      console.error("AI planner request failed with status", response.status);
+      throw new AppError("AI_UNAVAILABLE", "The AI planner could not generate a plan. Try again in a moment.");
+    }
+
+    try {
+      const payload = await response.json();
+      content = (payload as { choices?: { message?: { content?: unknown } }[] })?.choices?.[0]?.message?.content;
+    } catch (error) {
+      // Distinguish "the provider stalled and was aborted" from "unreadable body".
+      if (controller.signal.aborted) throw new AppError("AI_UNAVAILABLE", "The AI planner took too long to respond. Try again in a moment.");
+      throw new AppError("AI_INVALID_PLAN", "The AI returned an unreadable plan. Try generating again.");
+    }
+  } catch (error) {
+    if (error instanceof AppError) throw error;
     throw new AppError("AI_UNAVAILABLE", "The AI planner could not be reached. Try again in a moment.");
   } finally {
     clearTimeout(timeout);
   }
 
-  if (response.status === 429) throw new AppError("AI_RATE_LIMITED", "The AI planner is busy right now. Wait a moment and try again.");
-  if (!response.ok) {
-    console.error("AI planner request failed with status", response.status);
-    throw new AppError("AI_UNAVAILABLE", "The AI planner could not generate a plan. Try again in a moment.");
-  }
-
-  let payload: unknown;
-  try {
-    payload = await response.json();
-  } catch {
-    throw new AppError("AI_INVALID_PLAN", "The AI returned an unreadable plan. Try generating again.");
-  }
-  const content = (payload as { choices?: { message?: { content?: unknown } }[] })?.choices?.[0]?.message?.content;
   if (typeof content !== "string") throw new AppError("AI_INVALID_PLAN", "The AI returned an unreadable plan. Try generating again.");
   return parsePlanResponse(content);
 }
