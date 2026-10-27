@@ -109,12 +109,16 @@ function parseBulkDueDate(dueDate: string | null) {
  * request either lands completely or not at all.
  *
  * Duplicate-request protection: `planId` identifies the plan (a
- * client-generated id such as a UUID). If a TASK_CREATED activity carrying
- * the same `[plan:<id>]` marker already exists for this job and user, nothing
- * is inserted and `{ duplicate: true }` is returned, making retries safe. A
- * transaction-scoped advisory lock serializes concurrent retries so the
- * marker check cannot race. The bracketed marker is matched literally, so
- * plan ids that are prefixes of each other never collide.
+ * client-generated id such as a UUID). The summary activity message starts
+ * with the fixed prefix `Bulk plan [plan:<id>]:` and the duplicate lookup
+ * requires that prefix at position 1 of the message. Ordinary single-task
+ * activities embed the user-controlled title, so a task title containing a
+ * fake `[plan:<id>]` marker can never satisfy the anchored match. Nothing is
+ * inserted when the prefix is found and `{ duplicate: true }` is returned,
+ * making retries safe. A transaction-scoped advisory lock serializes
+ * concurrent retries so the marker check cannot race. The lookup uses
+ * strpos (literal, no LIKE wildcards) and the `]` terminator cannot appear
+ * inside a plan id, so distinct ids never cross-match.
  */
 export async function createTasksBulk(jobId: string, userId: string, planId: string, tasks: BulkTaskInput[]): Promise<BulkCreateTasksResult> {
   await assertOwnedJob(jobId, userId);
@@ -132,19 +136,21 @@ export async function createTasksBulk(jobId: string, userId: string, planId: str
     return { title: cleanTitle, dueDate: parseBulkDueDate(task.dueDate ?? null) };
   });
 
-  const marker = `[plan:${cleanPlanId}]`;
+  const marker = `Bulk plan [plan:${cleanPlanId}]:`;
   return prisma.$transaction(async tx => {
     // Serialize retries of the same plan: a concurrent duplicate blocks here
     // until the first transaction commits, then sees the marker below.
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${marker}))`;
-    // Literal substring match via strpos: Prisma's `contains` uses LIKE
-    // semantics on PostgreSQL where `_` matches any single character, which
-    // would cross-match plan ids that differ only in underscore/hyphen
-    // positions. strpos has no wildcard interpretation.
+    // Genuine bulk summaries, and only they, begin with `marker`. The match
+    // is anchored to position 1 via strpos (literal, no LIKE wildcards —
+    // unlike Prisma's `contains`, where `_` matches any character), so a
+    // normal task whose title embeds a fake `[plan:<id>]` marker cannot be
+    // mistaken for a bulk summary: its activity message starts with
+    // `Created task "…"` and the title appears mid-message.
     const prior = await tx.$queryRaw<Array<{ id: string }>>`
       SELECT "id" FROM "Activity"
       WHERE "jobId" = ${jobId} AND "userId" = ${userId} AND "type" = 'TASK_CREATED'
-        AND strpos("message", ${marker}) > 0
+        AND strpos("message", ${marker}) = 1
       LIMIT 1`;
     if (prior.length > 0) return { duplicate: true, created: [] as TaskRecord[] };
 
@@ -152,7 +158,7 @@ export async function createTasksBulk(jobId: string, userId: string, planId: str
     for (const task of prepared) {
       created.push(await tx.task.create({ data: { title: task.title, dueDate: task.dueDate, jobId }, select: taskSelect }));
     }
-    await tx.activity.create({ data: { type: ActivityType.TASK_CREATED, message: `Created ${created.length} tasks in bulk (${marker})`, jobId, userId } });
+    await tx.activity.create({ data: { type: ActivityType.TASK_CREATED, message: `${marker} created ${created.length} tasks`, jobId, userId } });
     return { duplicate: false, created };
   });
 }

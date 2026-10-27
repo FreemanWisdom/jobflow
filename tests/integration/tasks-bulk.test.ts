@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { ActivityType, JobPriority, JobStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { createJob } from "@/lib/jobs/data-access";
-import { createTasksBulk, MAX_BULK_TASKS } from "@/lib/tasks/data-access";
+import { createTask, createTasksBulk, MAX_BULK_TASKS } from "@/lib/tasks/data-access";
 import { AppError } from "@/lib/errors";
 
 /**
@@ -75,6 +75,7 @@ describe("createTasksBulk", () => {
     const summary = activities.find(a => a.type === ActivityType.TASK_CREATED);
     expect(summary).toBeTruthy();
     expect(summary?.message).toContain(`[plan:${plan}]`);
+    expect(summary?.message.startsWith(`Bulk plan [plan:${plan}]:`)).toBe(true);
     expect(summary?.message).toContain("2");
   });
 
@@ -203,6 +204,27 @@ describe("createTasksBulk", () => {
     expect((await createTasksBulk(job.id, userA, similarUnderscoreId, [taskInput({ title: "Retry similar" })])).duplicate).toBe(true);
     expect(await prisma.task.count({ where: { jobId: job.id } })).toBe(3);
     expect(await prisma.activity.count({ where: { jobId: job.id, type: ActivityType.TASK_CREATED } })).toBe(3);
+  });
+
+  it("ignores plan markers embedded in ordinary task titles (spoof protection)", async () => {
+    const job = await makeJob(userA, "Marker spoof job");
+    const plan = planId();
+    // A normal task whose title embeds a fake marker...
+    await createTask(job.id, userA, `Review [plan:${plan}] deliverables`, null);
+    // ...and one whose title mimics the entire bulk summary prefix. Both log
+    // ordinary "Created task ..." activities whose messages merely contain
+    // the marker mid-string; neither may be mistaken for a bulk summary.
+    await createTask(job.id, userA, `Bulk plan [plan:${plan}]: created 5 tasks`, null);
+
+    const result = await createTasksBulk(job.id, userA, plan, [taskInput(), taskInput({ title: "Second planned task" })]);
+    expect(result.duplicate).toBe(false);
+    expect(result.created).toHaveLength(2);
+    expect(await prisma.task.count({ where: { jobId: job.id } })).toBe(4);
+
+    // A retry of the same plan is still detected via its own genuine summary.
+    const retry = await createTasksBulk(job.id, userA, plan, [taskInput(), taskInput({ title: "Second planned task" })]);
+    expect(retry.duplicate).toBe(true);
+    expect(await prisma.task.count({ where: { jobId: job.id } })).toBe(4);
   });
 
   it("serializes concurrent retries of the same plan so only one batch lands", async () => {
