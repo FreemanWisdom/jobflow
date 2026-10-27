@@ -90,7 +90,13 @@ export type BulkCreateTasksResult = {
 
 const dueDatePattern = /^\d{4}-\d{2}-\d{2}$/;
 
-function parseBulkDueDate(dueDate: string | null) {
+/**
+ * Parse a strict YYYY-MM-DD calendar date. Throws INVALID_INPUT on formats
+ * other than YYYY-MM-DD and on impossible calendar dates that JavaScript
+ * would silently normalize (2026-02-30, 02-29 in a non-leap year, month 13,
+ * day 0). Exported for reuse by the AI planner's output validation.
+ */
+export function parseStrictDueDate(dueDate: string | null) {
   if (!dueDate) return null;
   if (!dueDatePattern.test(dueDate)) throw new AppError("INVALID_INPUT", "Task due date is invalid.");
   const [year, month, day] = dueDate.split("-").map(Number);
@@ -133,7 +139,7 @@ export async function createTasksBulk(jobId: string, userId: string, planId: str
   const prepared = list.map(task => {
     const cleanTitle = typeof task?.title === "string" ? task.title.trim() : "";
     if (!cleanTitle || cleanTitle.length > 200) throw new AppError("INVALID_INPUT", "Task titles are required and must be 200 characters or fewer.");
-    return { title: cleanTitle, dueDate: parseBulkDueDate(task.dueDate ?? null) };
+    return { title: cleanTitle, dueDate: parseStrictDueDate(task.dueDate ?? null) };
   });
 
   const marker = `Bulk plan [plan:${cleanPlanId}]:`;

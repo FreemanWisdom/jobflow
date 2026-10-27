@@ -1,6 +1,6 @@
 import "server-only";
 
-export type AppErrorCode = "INVALID_INPUT" | "NOT_FOUND" | "DATABASE_ERROR";
+export type AppErrorCode = "INVALID_INPUT" | "NOT_FOUND" | "DATABASE_ERROR" | "AI_NOT_CONFIGURED" | "AI_UNAVAILABLE" | "AI_RATE_LIMITED" | "AI_INVALID_PLAN";
 
 export class AppError extends Error {
   constructor(
